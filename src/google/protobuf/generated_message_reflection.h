@@ -292,12 +292,12 @@ struct MigrationSchema {
 // The num_xxx might not be close to their respective pointer, but this saves
 // padding.
 struct PROTOBUF_EXPORT DescriptorTable {
-  mutable bool is_initialized;
+  mutable bool is_initialized = false;
   bool is_eager;
   int size;  // of serialized descriptor
   const char* descriptor;
   const char* filename;
-  absl::once_flag* once;
+  mutable absl::once_flag once;
   const DescriptorTable* const* deps;
   int num_deps;
   int num_messages;
@@ -308,6 +308,28 @@ struct PROTOBUF_EXPORT DescriptorTable {
   Metadata* file_level_metadata;
   const EnumDescriptor** file_level_enum_descriptors;
   const ServiceDescriptor** file_level_service_descriptors;
+
+  constexpr DescriptorTable(
+      bool is_eager, int size, const char* descriptor, const char* filename,
+      const DescriptorTable* const* deps, int num_deps, int num_messages,
+      const MigrationSchema* schemas, const Message* const* default_instances,
+      const uint32_t* offsets, Metadata* file_level_metadata,
+      const EnumDescriptor** file_level_enum_descriptors,
+      const ServiceDescriptor** file_level_service_descriptors)
+      : is_eager(is_eager),
+        size(size),
+        descriptor(descriptor),
+        filename(filename),
+        once(),
+        deps(deps),
+        num_deps(num_deps),
+        num_messages(num_messages),
+        schemas(schemas),
+        default_instances(default_instances),
+        offsets(offsets),
+        file_level_metadata(file_level_metadata),
+        file_level_enum_descriptors(file_level_enum_descriptors),
+        file_level_service_descriptors(file_level_service_descriptors) {}
 };
 
 // AssignDescriptors() pulls the compiled FileDescriptor from the DescriptorPool
