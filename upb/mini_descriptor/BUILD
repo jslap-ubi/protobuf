@@ -62,7 +62,6 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "//upb:base",
         "//upb:mem",
-        "//upb:message_accessors_internal",
         "//upb:mini_table",
         "//upb:mini_table_internal",
         "//upb:wire",

@@ -19,13 +19,13 @@
 #include "upb/base/descriptor_constants.h"
 #include "upb/base/status.hpp"
 #include "upb/mem/arena.hpp"
-#include "upb/message/internal/accessors.h"
 #include "upb/mini_descriptor/decode.h"
 #include "upb/mini_descriptor/internal/base92.h"
 #include "upb/mini_descriptor/internal/modifiers.h"
 #include "upb/mini_table/enum.h"
 #include "upb/mini_table/field.h"
 #include "upb/mini_table/internal/field.h"
+#include "upb/mini_table/internal/message.h"
 #include "upb/mini_table/message.h"
 
 // begin:google_only
@@ -152,7 +152,7 @@ TEST_P(MiniTableTest, AllScalarTypesOneof) {
     // For a oneof all fields have the same offset.
     EXPECT_EQ(table->fields[0].offset, f->offset);
     // All presence fields should point to the same oneof case offset.
-    size_t case_ofs = _upb_OneofCase_Offset(f);
+    size_t case_ofs = upb_MiniTableField_OneofOffset(f);
     EXPECT_EQ(table->fields[0].presence, f->presence);
     EXPECT_TRUE(f->offset < table->size);
     EXPECT_TRUE(case_ofs < table->size);
