@@ -8,6 +8,7 @@
 #include "upb/message/accessors.h"
 
 #include "upb/message/array.h"
+#include "upb/message/internal/accessors.h"
 #include "upb/message/internal/array.h"
 #include "upb/message/map.h"
 #include "upb/message/message.h"
@@ -39,10 +40,10 @@ upb_MapInsertStatus upb_Message_InsertMapEntry(upb_Map* map,
   memset(&default_val, 0, sizeof(upb_MessageValue));
   upb_MessageValue map_entry_key;
   upb_MessageValue map_entry_value;
-  _upb_Message_GetField(map_entry_message, map_entry_key_field, &default_val,
-                        &map_entry_key);
-  _upb_Message_GetField(map_entry_message, map_entry_value_field, &default_val,
-                        &map_entry_value);
+  upb_Message_GetField(map_entry_message, map_entry_key_field, default_val,
+                       &map_entry_key);
+  upb_Message_GetField(map_entry_message, map_entry_value_field, default_val,
+                       &map_entry_value);
   return upb_Map_Insert(map, map_entry_key, map_entry_value, arena);
 }
 
