@@ -40,8 +40,11 @@ namespace protobuf {
 namespace {
 
 using ::testing::AllOf;
+using ::testing::ElementsAre;
 using ::testing::ExplainMatchResult;
 using ::testing::HasSubstr;
+using ::testing::IsEmpty;
+using ::testing::UnorderedElementsAre;
 
 // TODO: Use the gtest versions once that's available in OSS.
 template <typename T>
@@ -204,12 +207,45 @@ TEST(FeatureResolverTest, DefaultsGeneratedPoolCustom) {
   ASSERT_OK(defaults);
   ASSERT_EQ(defaults->defaults().size(), 3);
   ASSERT_EQ(defaults->defaults().at(2).edition(), EDITION_2023);
-  FeatureSet merged = defaults->defaults().at(2).features();
+  FeatureSet merged = defaults->defaults().at(2).overridable_features();
 
   EXPECT_EQ(merged.field_presence(), FeatureSet::EXPLICIT);
   EXPECT_TRUE(merged.HasExtension(pb::test));
   EXPECT_EQ(merged.GetExtension(pb::test).file_feature(), pb::VALUE3);
   EXPECT_FALSE(merged.HasExtension(pb::cpp));
+}
+
+TEST(FeatureResolverTest, DefaultsMergedFeatures) {
+  absl::StatusOr<FeatureSetDefaults> defaults =
+      FeatureResolver::CompileDefaults(FeatureSet::descriptor(),
+                                       {GetExtension(pb::test)}, EDITION_2023,
+                                       EDITION_2023);
+  ASSERT_OK(defaults);
+  ASSERT_EQ(defaults->defaults_size(), 3);
+
+  defaults->mutable_defaults(2)
+      ->mutable_fixed_features()
+      ->MutableExtension(pb::test)
+      ->set_file_feature(pb::VALUE7);
+  defaults->mutable_defaults(2)
+      ->mutable_fixed_features()
+      ->MutableExtension(pb::test)
+      ->set_multiple_feature(pb::VALUE6);
+  defaults->mutable_defaults(2)
+      ->mutable_overridable_features()
+      ->MutableExtension(pb::test)
+      ->clear_file_feature();
+  defaults->mutable_defaults(2)
+      ->mutable_overridable_features()
+      ->MutableExtension(pb::test)
+      ->set_multiple_feature(pb::VALUE8);
+
+  absl::StatusOr<FeatureSet> features = GetDefaults(EDITION_2023, *defaults);
+  ASSERT_OK(features);
+
+  const pb::TestFeatures& ext = features->GetExtension(pb::test);
+  EXPECT_EQ(ext.file_feature(), pb::VALUE7);
+  EXPECT_EQ(ext.multiple_feature(), pb::VALUE8);
 }
 
 TEST(FeatureResolverTest, DefaultsTooEarly) {
@@ -245,6 +281,75 @@ TEST(FeatureResolverTest, DefaultsMiddleEdition) {
   EXPECT_TRUE(ext.bool_field_feature());
 }
 
+TEST(FeatureResolverTest, CompileDefaultsFixedFutureFeature) {
+  absl::StatusOr<FeatureSetDefaults> defaults =
+      FeatureResolver::CompileDefaults(FeatureSet::descriptor(),
+                                       {GetExtension(pb::test)}, EDITION_PROTO2,
+                                       EDITION_2023);
+  ASSERT_OK(defaults);
+  ASSERT_EQ(defaults->defaults_size(), 3);
+
+  const auto& edition_defaults = defaults->defaults(2);
+  ASSERT_EQ(edition_defaults.edition(), EDITION_2023);
+
+  EXPECT_TRUE(edition_defaults.fixed_features()
+                  .GetExtension(pb::test)
+                  .has_future_feature());
+  EXPECT_EQ(
+      edition_defaults.fixed_features().GetExtension(pb::test).future_feature(),
+      pb::VALUE1);
+  EXPECT_FALSE(edition_defaults.overridable_features()
+                   .GetExtension(pb::test)
+                   .has_future_feature());
+}
+
+TEST(FeatureResolverTest, CompileDefaultsFixedRemovedFeature) {
+  absl::StatusOr<FeatureSetDefaults> defaults =
+      FeatureResolver::CompileDefaults(FeatureSet::descriptor(),
+                                       {GetExtension(pb::test)}, EDITION_PROTO2,
+                                       EDITION_2024);
+  ASSERT_OK(defaults);
+  ASSERT_EQ(defaults->defaults_size(), 4);
+
+  const auto& edition_defaults = defaults->defaults(3);
+  ASSERT_EQ(edition_defaults.edition(), EDITION_2024);
+
+  EXPECT_TRUE(edition_defaults.fixed_features()
+                  .GetExtension(pb::test)
+                  .has_removed_feature());
+  EXPECT_EQ(edition_defaults.fixed_features()
+                .GetExtension(pb::test)
+                .removed_feature(),
+            pb::VALUE3);
+  EXPECT_FALSE(edition_defaults.overridable_features()
+                   .GetExtension(pb::test)
+                   .has_removed_feature());
+}
+
+
+TEST(FeatureResolverTest, CompileDefaultsOverridable) {
+  absl::StatusOr<FeatureSetDefaults> defaults =
+      FeatureResolver::CompileDefaults(FeatureSet::descriptor(),
+                                       {GetExtension(pb::test)}, EDITION_PROTO2,
+                                       EDITION_2023);
+  ASSERT_OK(defaults);
+  ASSERT_EQ(defaults->defaults_size(), 3);
+
+  const auto& edition_defaults = defaults->defaults(2);
+  ASSERT_EQ(edition_defaults.edition(), EDITION_2023);
+
+  EXPECT_FALSE(edition_defaults.fixed_features()
+                   .GetExtension(pb::test)
+                   .has_removed_feature());
+  EXPECT_TRUE(edition_defaults.overridable_features()
+                  .GetExtension(pb::test)
+                  .has_removed_feature());
+  EXPECT_EQ(edition_defaults.overridable_features()
+                .GetExtension(pb::test)
+                .removed_feature(),
+            pb::VALUE2);
+}
+
 TEST(FeatureResolverTest, CreateFromUnsortedDefaults) {
   auto valid_defaults = FeatureResolver::CompileDefaults(
       FeatureSet::descriptor(), {}, EDITION_PROTO2, EDITION_2023);
@@ -263,10 +368,7 @@ TEST(FeatureResolverTest, CreateUnknownEdition) {
   FeatureSetDefaults defaults = ParseTextOrDie(R"pb(
     minimum_edition: EDITION_UNKNOWN
     maximum_edition: EDITION_99999_TEST_ONLY
-    defaults {
-      edition: EDITION_UNKNOWN
-      features {}
-    }
+    defaults { edition: EDITION_UNKNOWN }
   )pb");
   EXPECT_THAT(FeatureResolver::Create(EDITION_2023, defaults),
               HasError(HasSubstr("Invalid edition UNKNOWN")));
@@ -276,7 +378,7 @@ TEST(FeatureResolverTest, CreateMissingEdition) {
   FeatureSetDefaults defaults = ParseTextOrDie(R"pb(
     minimum_edition: EDITION_UNKNOWN
     maximum_edition: EDITION_99999_TEST_ONLY
-    defaults { features {} }
+    defaults {}
   )pb");
   EXPECT_THAT(FeatureResolver::Create(EDITION_2023, defaults),
               HasError(HasSubstr("Invalid edition UNKNOWN")));
@@ -292,13 +394,15 @@ TEST(FeatureResolverTest, CreateUnknownEnumFeature) {
   for (int i = 0; i < descriptor.field_count(); ++i) {
     const FieldDescriptor& field = *descriptor.field(i);
 
+    // Clear the feature, which should be invalid.
     FeatureSetDefaults defaults = *valid_defaults;
     FeatureSet* features =
-        defaults.mutable_defaults()->Mutable(0)->mutable_features();
-    const Reflection& reflection = *features->GetReflection();
+        defaults.mutable_defaults()->Mutable(0)->mutable_overridable_features();
+    features->GetReflection()->ClearField(features, &field);
+    features =
+        defaults.mutable_defaults()->Mutable(0)->mutable_fixed_features();
+    features->GetReflection()->ClearField(features, &field);
 
-    // Clear the feature, which should be invalid.
-    reflection.ClearField(features, &field);
     EXPECT_THAT(FeatureResolver::Create(EDITION_2023, defaults),
                 HasError(AllOf(HasSubstr(field.name()),
                                HasSubstr("must resolve to a known value"))));
@@ -459,6 +563,100 @@ TEST(FeatureResolverTest, MergeFeaturesDistantFuture) {
                      HasSubstr("maximum supported edition 99997_TEST_ONLY"))));
 }
 
+TEST(FeatureResolverLifetimesTest, Valid) {
+  FeatureSet features = ParseTextOrDie(R"pb(
+    [pb.test] { file_feature: VALUE1 }
+  )pb");
+  auto results = FeatureResolver::ValidateFeatureLifetimes(EDITION_2023,
+                                                           features, nullptr);
+  EXPECT_THAT(results.errors, IsEmpty());
+  EXPECT_THAT(results.warnings, IsEmpty());
+}
+
+TEST(FeatureResolverLifetimesTest, DeprecatedFeature) {
+  FeatureSet features = ParseTextOrDie(R"pb(
+    [pb.test] { removed_feature: VALUE1 }
+  )pb");
+  auto results = FeatureResolver::ValidateFeatureLifetimes(EDITION_2023,
+                                                           features, nullptr);
+  EXPECT_THAT(results.errors, IsEmpty());
+  EXPECT_THAT(
+      results.warnings,
+      ElementsAre(AllOf(HasSubstr("pb.TestFeatures.removed_feature"),
+                        HasSubstr("deprecated in edition 2023"),
+                        HasSubstr("Custom feature deprecation warning"))));
+}
+
+TEST(FeatureResolverLifetimesTest, RemovedFeature) {
+  FeatureSet features = ParseTextOrDie(R"pb(
+    [pb.test] { removed_feature: VALUE1 }
+  )pb");
+  auto results = FeatureResolver::ValidateFeatureLifetimes(EDITION_2024,
+                                                           features, nullptr);
+  EXPECT_THAT(results.errors,
+              ElementsAre(AllOf(HasSubstr("pb.TestFeatures.removed_feature"),
+                                HasSubstr("removed in edition 2024"))));
+  EXPECT_THAT(results.warnings, IsEmpty());
+}
+
+TEST(FeatureResolverLifetimesTest, NotIntroduced) {
+  FeatureSet features = ParseTextOrDie(R"pb(
+    [pb.test] { future_feature: VALUE1 }
+  )pb");
+  auto results = FeatureResolver::ValidateFeatureLifetimes(EDITION_2023,
+                                                           features, nullptr);
+  EXPECT_THAT(results.errors,
+              ElementsAre(AllOf(HasSubstr("pb.TestFeatures.future_feature"),
+                                HasSubstr("introduced until edition 2024"))));
+  EXPECT_THAT(results.warnings, IsEmpty());
+}
+
+TEST(FeatureResolverLifetimesTest, WarningsAndErrors) {
+  FeatureSet features = ParseTextOrDie(R"pb(
+    [pb.test] { future_feature: VALUE1 removed_feature: VALUE1 }
+  )pb");
+  auto results = FeatureResolver::ValidateFeatureLifetimes(EDITION_2023,
+                                                           features, nullptr);
+  EXPECT_THAT(results.errors,
+              ElementsAre(HasSubstr("pb.TestFeatures.future_feature")));
+  EXPECT_THAT(results.warnings,
+              ElementsAre(HasSubstr("pb.TestFeatures.removed_feature")));
+}
+
+TEST(FeatureResolverLifetimesTest, MultipleErrors) {
+  FeatureSet features = ParseTextOrDie(R"pb(
+    [pb.test] { future_feature: VALUE1 legacy_feature: VALUE1 }
+  )pb");
+  auto results = FeatureResolver::ValidateFeatureLifetimes(EDITION_2023,
+                                                           features, nullptr);
+  EXPECT_THAT(results.errors, UnorderedElementsAre(
+                                  HasSubstr("pb.TestFeatures.future_feature"),
+                                  HasSubstr("pb.TestFeatures.legacy_feature")));
+  EXPECT_THAT(results.warnings, IsEmpty());
+}
+
+TEST(FeatureResolverLifetimesTest, DynamicPool) {
+  DescriptorPool pool;
+  FileDescriptorProto file;
+  FileDescriptorProto::GetDescriptor()->file()->CopyTo(&file);
+  ASSERT_NE(pool.BuildFile(file), nullptr);
+  pb::TestFeatures::GetDescriptor()->file()->CopyTo(&file);
+  ASSERT_NE(pool.BuildFile(file), nullptr);
+  const Descriptor* feature_set =
+      pool.FindMessageTypeByName("google.protobuf.FeatureSet");
+  ASSERT_NE(feature_set, nullptr);
+
+  FeatureSet features = ParseTextOrDie(R"pb(
+    [pb.test] { future_feature: VALUE1 removed_feature: VALUE1 }
+  )pb");
+  auto results = FeatureResolver::ValidateFeatureLifetimes(
+      EDITION_2023, features, feature_set);
+  EXPECT_THAT(results.errors,
+              ElementsAre(HasSubstr("pb.TestFeatures.future_feature")));
+  EXPECT_THAT(results.warnings,
+              ElementsAre(HasSubstr("pb.TestFeatures.removed_feature")));
+}
+
 class FakeErrorCollector : public io::ErrorCollector {
  public:
   FakeErrorCollector() = default;
@@ -560,7 +758,8 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithExtensions) {
     extend Foo {
       optional Foo bar2 = 1 [
         targets = TARGET_TYPE_FIELD,
-        edition_defaults = { edition: EDITION_2023, value: "" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_LEGACY, value: "" }
       ];
     }
   )schema");
@@ -586,11 +785,13 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithOneof) {
       oneof x {
         int32 int_field = 1 [
           targets = TARGET_TYPE_FIELD,
-          edition_defaults = { edition: EDITION_2023, value: "1" }
+          feature_support.edition_introduced = EDITION_2023,
+          edition_defaults = { edition: EDITION_LEGACY, value: "1" }
         ];
         string string_field = 2 [
           targets = TARGET_TYPE_FIELD,
-          edition_defaults = { edition: EDITION_2023, value: "'hello'" }
+          feature_support.edition_introduced = EDITION_2023,
+          edition_defaults = { edition: EDITION_LEGACY, value: "'hello'" }
         ];
       }
     }
@@ -616,7 +817,8 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithRequired) {
     message Foo {
       required int32 required_field = 1 [
         targets = TARGET_TYPE_FIELD,
-        edition_defaults = { edition: EDITION_2023, value: "" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_LEGACY, value: "" }
       ];
     }
   )schema");
@@ -641,7 +843,8 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithRepeated) {
     message Foo {
       repeated int32 repeated_field = 1 [
         targets = TARGET_TYPE_FIELD,
-        edition_defaults = { edition: EDITION_2023, value: "1" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_LEGACY, value: "1" }
       ];
     }
   )schema");
@@ -665,7 +868,8 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithMissingTarget) {
     }
     message Foo {
       optional bool bool_field = 1 [
-        edition_defaults = { edition: EDITION_2023, value: "true" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
       ];
     }
   )schema");
@@ -676,6 +880,300 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithMissingTarget) {
                                                EDITION_2023, EDITION_2023),
               HasError(AllOf(HasSubstr("test.Foo.bool_field"),
                              HasSubstr("no target specified"))));
+}
+
+TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithMissingSupport) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("no feature support"))));
+}
+
+TEST_F(FeatureResolverPoolTest,
+       CompileDefaultsInvalidWithMissingEditionIntroduced) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {},
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("it was introduced in"))));
+}
+
+TEST_F(FeatureResolverPoolTest,
+       CompileDefaultsInvalidWithMissingDeprecationWarning) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_2023
+          edition_deprecated: EDITION_2023
+        },
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("deprecation warning"))));
+}
+
+TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithMissingDeprecation) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_2023
+          deprecation_warning: "some message"
+        },
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("is not marked deprecated"))));
+}
+
+TEST_F(FeatureResolverPoolTest,
+       CompileDefaultsInvalidDeprecatedBeforeIntroduced) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_2024
+          edition_deprecated: EDITION_2023
+          deprecation_warning: "warning"
+        },
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(
+      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
+                                       EDITION_2023),
+      HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                     HasSubstr("deprecated before it was introduced"))));
+}
+
+TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidDeprecatedAfterRemoved) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_2023
+          edition_deprecated: EDITION_2024
+          deprecation_warning: "warning"
+          edition_removed: EDITION_2024
+        },
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("deprecated after it was removed"))));
+}
+
+TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidRemovedBeforeIntroduced) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_2024
+          edition_removed: EDITION_2023
+        },
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("removed before it was introduced"))));
+}
+
+TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidMissingLegacyDefaults) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_2024
+        },
+        edition_defaults = { edition: EDITION_2024, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(
+      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
+                                       EDITION_2023),
+      HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                     HasSubstr("no default specified for EDITION_LEGACY"))));
+}
+
+TEST_F(FeatureResolverPoolTest,
+       CompileDefaultsInvalidDefaultsBeforeIntroduced) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_2024
+        },
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" },
+        edition_defaults = { edition: EDITION_2023, value: "false" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("specified for edition 2023"),
+                             HasSubstr("before it was introduced"))));
+}
+
+TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidDefaultsAfterRemoved) {
+  const FileDescriptor* file = ParseSchema(R"schema(
+    syntax = "proto2";
+    package test;
+    import "google/protobuf/descriptor.proto";
+
+    extend google.protobuf.FeatureSet {
+      optional Foo bar = 9999;
+    }
+    message Foo {
+      optional bool bool_field = 1 [
+        targets = TARGET_TYPE_FIELD,
+        feature_support = {
+          edition_introduced: EDITION_PROTO2
+          edition_removed: EDITION_2023
+        },
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" },
+        edition_defaults = { edition: EDITION_2024, value: "true" }
+      ];
+    }
+  )schema");
+  ASSERT_NE(file, nullptr);
+
+  const FieldDescriptor* ext = file->extension(0);
+  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
+                                               EDITION_2023, EDITION_2023),
+              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                             HasSubstr("specified for edition 2024"),
+                             HasSubstr("after it was removed"))));
 }
 
 TEST_F(FeatureResolverPoolTest,
@@ -691,7 +1189,8 @@ TEST_F(FeatureResolverPoolTest,
     message Foo {
       optional bool field_feature = 12 [
         targets = TARGET_TYPE_FIELD,
-        edition_defaults = { edition: EDITION_PROTO2, value: "1.23" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_LEGACY, value: "1.23" }
       ];
     }
   )schema");
@@ -717,8 +1216,9 @@ TEST_F(FeatureResolverPoolTest,
     message Foo {
       optional bool field_feature = 12 [
         targets = TARGET_TYPE_FIELD,
+        feature_support.edition_introduced = EDITION_2023,
         edition_defaults = { edition: EDITION_99997_TEST_ONLY, value: "1.5" },
-        edition_defaults = { edition: EDITION_PROTO2, value: "true" }
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
       ];
     }
   )schema");
@@ -747,7 +1247,9 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidDefaultsTooEarly) {
     message Foo {
       optional bool field_feature = 12 [
         targets = TARGET_TYPE_FIELD,
-        edition_defaults = { edition: EDITION_2_TEST_ONLY, value: "true" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_2_TEST_ONLY, value: "true" },
+        edition_defaults = { edition: EDITION_LEGACY, value: "false" }
       ];
     }
   )schema");
@@ -772,7 +1274,8 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumTooEarly) {
     message Foo {
       optional bool field_feature = 12 [
         targets = TARGET_TYPE_FIELD,
-        edition_defaults = { edition: EDITION_PROTO2, value: "true" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_LEGACY, value: "true" }
       ];
     }
   )schema");
@@ -782,7 +1285,7 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumTooEarly) {
   EXPECT_THAT(
       FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_1_TEST_ONLY,
                                        EDITION_99997_TEST_ONLY),
-      HasError(HasSubstr("No valid default found for edition 1_TEST_ONLY")));
+      HasError(HasSubstr("edition 1_TEST_ONLY is earlier than the oldest")));
 }
 
 TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumCovered) {
@@ -803,9 +1306,10 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumCovered) {
     message Foo {
       optional Bar file_feature = 1 [
         targets = TARGET_TYPE_FIELD,
+        feature_support.edition_introduced = EDITION_2023,
         edition_defaults = { edition: EDITION_99998_TEST_ONLY, value: "VALUE3" },
         edition_defaults = { edition: EDITION_2023, value: "VALUE2" },
-        edition_defaults = { edition: EDITION_PROTO2, value: "VALUE1" }
+        edition_defaults = { edition: EDITION_LEGACY, value: "VALUE1" }
       ];
     }
   )schema");
@@ -821,7 +1325,10 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumCovered) {
     maximum_edition: EDITION_99999_TEST_ONLY
     defaults {
       edition: EDITION_PROTO2
-      features {
+      overridable_features {
+        [pb.test] {}
+      }
+      fixed_features {
         field_presence: EXPLICIT
         enum_type: CLOSED
         repeated_field_encoding: EXPANDED
@@ -833,7 +1340,10 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumCovered) {
     }
     defaults {
       edition: EDITION_PROTO3
-      features {
+      overridable_features {
+        [pb.test] {}
+      }
+      fixed_features {
         field_presence: IMPLICIT
         enum_type: OPEN
         repeated_field_encoding: PACKED
@@ -845,7 +1355,7 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumCovered) {
     }
     defaults {
       edition: EDITION_2023
-      features {
+      overridable_features {
         field_presence: EXPLICIT
         enum_type: OPEN
         repeated_field_encoding: PACKED
@@ -854,10 +1364,13 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumCovered) {
         json_format: ALLOW
         [pb.test] { file_feature: VALUE2 }
       }
+      fixed_features {
+        [pb.test] {}
+      }
     }
     defaults {
       edition: EDITION_99998_TEST_ONLY
-      features {
+      overridable_features {
         field_presence: EXPLICIT
         enum_type: OPEN
         repeated_field_encoding: PACKED
@@ -865,6 +1378,9 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumCovered) {
         message_encoding: LENGTH_PREFIXED
         json_format: ALLOW
         [pb.test] { file_feature: VALUE3 }
+      }
+      fixed_features {
+        [pb.test] {}
       }
     }
   )pb"));
@@ -889,7 +1405,8 @@ TEST_P(FeatureUnboundedTypeTest, CompileDefaults) {
     message Foo {
       optional $0 field_feature = 12 [
         targets = TARGET_TYPE_FIELD,
-        edition_defaults = { edition: EDITION_PROTO2, value: "1" }
+        feature_support.edition_introduced = EDITION_2023,
+        edition_defaults = { edition: EDITION_LEGACY, value: "1" }
       ];
     }
   )schema",

@@ -14,7 +14,12 @@
 // Must be included last.
 #include "google/protobuf/port_def.inc"
 
+// Since we could be merging Translation units, we must check if this was done
+// before.
+#ifndef PROTOBUF_PRAGMA_INIT_SEG_DONE
 PROTOBUF_PRAGMA_INIT_SEG
+#define PROTOBUF_PRAGMA_INIT_SEG_DONE
+#endif
 
 namespace google {
 namespace protobuf {
@@ -54,6 +59,7 @@ const MessageLite::ClassData* ImplicitWeakMessage::GetClassData() const {
       {
           &table.header,
           nullptr,  // on_demand_register_arena_dtor
+          nullptr,  // is_initialized (always true)
           PROTOBUF_FIELD_OFFSET(ImplicitWeakMessage, cached_size_),
           true,
       },

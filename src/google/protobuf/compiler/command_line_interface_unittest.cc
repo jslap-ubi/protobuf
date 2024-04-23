@@ -1761,6 +1761,63 @@ TEST_F(CommandLineInterfaceTest, Plugin_SourceFeatures) {
   }
 }
 
+TEST_F(CommandLineInterfaceTest, GeneratorFeatureLifetimeError) {
+  CreateTempFile("google/protobuf/descriptor.proto",
+                 google::protobuf::DescriptorProto::descriptor()->file()->DebugString());
+  CreateTempFile("google/protobuf/unittest_features.proto",
+                 pb::TestFeatures::descriptor()->file()->DebugString());
+  CreateTempFile("foo.proto",
+                 R"schema(
+    edition = "2024";
+    import "google/protobuf/unittest_features.proto";
+    package foo;
+    message Foo {
+      int32 b = 1 [
+        features.(pb.test).removed_feature = VALUE6
+      ];
+    }
+  )schema");
+
+  Run("protocol_compiler --experimental_editions --proto_path=$tmpdir "
+      "--test_out=$tmpdir foo.proto");
+  ExpectErrorSubstring(
+      "foo.proto:6:13: Feature pb.TestFeatures.removed_feature has been "
+      "removed in edition 2024");
+}
+
+TEST_F(CommandLineInterfaceTest, PluginFeatureLifetimeError) {
+  CreateTempFile("google/protobuf/descriptor.proto",
+                 google::protobuf::DescriptorProto::descriptor()->file()->DebugString());
+  CreateTempFile("google/protobuf/unittest_features.proto",
+                 pb::TestFeatures::descriptor()->file()->DebugString());
+  CreateTempFile("foo.proto",
+                 R"schema(
+    edition = "2023";
+    import "google/protobuf/unittest_features.proto";
+    package foo;
+    message Foo {
+      int32 b = 1 [
+        features.(pb.test).future_feature = VALUE6
+      ];
+    }
+  )schema");
+
+#ifdef GOOGLE_PROTOBUF_FAKE_PLUGIN_PATH
+  std::string plugin_path = GOOGLE_PROTOBUF_FAKE_PLUGIN_PATH;
+#else
+  std::string plugin_path = absl::StrCat(
+      TestUtil::TestSourceDir(), "/google/protobuf/compiler/fake_plugin");
+#endif
+
+  Run(absl::StrCat(
+      "protocol_compiler --fake_plugin_out=$tmpdir --proto_path=$tmpdir "
+      "foo.proto --plugin=prefix-gen-fake_plugin=",
+      plugin_path));
+  ExpectErrorSubstring(
+      "foo.proto:6:13: Feature pb.TestFeatures.future_feature wasn't "
+      "introduced until edition 2024");
+}
+
 TEST_F(CommandLineInterfaceTest, GeneratorNoEditionsSupport) {
   CreateTempFile("foo.proto", R"schema(
     edition = "2023";
@@ -1809,7 +1866,8 @@ TEST_F(CommandLineInterfaceTest, EditionDefaults) {
   EXPECT_THAT(defaults, EqualsProto(R"pb(
                 defaults {
                   edition: EDITION_PROTO2
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: EXPLICIT
                     enum_type: CLOSED
                     repeated_field_encoding: EXPANDED
@@ -1820,7 +1878,8 @@ TEST_F(CommandLineInterfaceTest, EditionDefaults) {
                 }
                 defaults {
                   edition: EDITION_PROTO3
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: IMPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -1831,7 +1890,7 @@ TEST_F(CommandLineInterfaceTest, EditionDefaults) {
                 }
                 defaults {
                   edition: EDITION_2023
-                  features {
+                  overridable_features {
                     field_presence: EXPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -1839,6 +1898,7 @@ TEST_F(CommandLineInterfaceTest, EditionDefaults) {
                     message_encoding: LENGTH_PREFIXED
                     json_format: ALLOW
                   }
+                  fixed_features {}
                 }
                 minimum_edition: EDITION_PROTO2
                 maximum_edition: EDITION_2023
@@ -1858,7 +1918,8 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMaximum) {
   EXPECT_THAT(defaults, EqualsProto(R"pb(
                 defaults {
                   edition: EDITION_PROTO2
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: EXPLICIT
                     enum_type: CLOSED
                     repeated_field_encoding: EXPANDED
@@ -1869,7 +1930,8 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMaximum) {
                 }
                 defaults {
                   edition: EDITION_PROTO3
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: IMPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -1880,7 +1942,7 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMaximum) {
                 }
                 defaults {
                   edition: EDITION_2023
-                  features {
+                  overridable_features {
                     field_presence: EXPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -1888,6 +1950,7 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMaximum) {
                     message_encoding: LENGTH_PREFIXED
                     json_format: ALLOW
                   }
+                  fixed_features {}
                 }
                 minimum_edition: EDITION_PROTO2
                 maximum_edition: EDITION_99997_TEST_ONLY
@@ -1908,7 +1971,8 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMinimum) {
   EXPECT_THAT(defaults, EqualsProto(R"pb(
                 defaults {
                   edition: EDITION_PROTO2
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: EXPLICIT
                     enum_type: CLOSED
                     repeated_field_encoding: EXPANDED
@@ -1919,7 +1983,8 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMinimum) {
                 }
                 defaults {
                   edition: EDITION_PROTO3
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: IMPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -1930,7 +1995,7 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMinimum) {
                 }
                 defaults {
                   edition: EDITION_2023
-                  features {
+                  overridable_features {
                     field_presence: EXPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -1938,6 +2003,7 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithMinimum) {
                     message_encoding: LENGTH_PREFIXED
                     json_format: ALLOW
                   }
+                  fixed_features {}
                 }
                 minimum_edition: EDITION_99997_TEST_ONLY
                 maximum_edition: EDITION_99999_TEST_ONLY
@@ -1958,27 +2024,37 @@ TEST_F(CommandLineInterfaceTest, EditionDefaultsWithExtension) {
   FeatureSetDefaults defaults = ReadEditionDefaults("defaults");
   EXPECT_EQ(defaults.minimum_edition(), EDITION_PROTO2);
   EXPECT_EQ(defaults.maximum_edition(), EDITION_99999_TEST_ONLY);
-  ASSERT_EQ(defaults.defaults_size(), 5);
+  ASSERT_EQ(defaults.defaults_size(), 6);
   EXPECT_EQ(defaults.defaults(0).edition(), EDITION_PROTO2);
-  EXPECT_EQ(defaults.defaults(1).edition(), EDITION_PROTO3);
   EXPECT_EQ(defaults.defaults(2).edition(), EDITION_2023);
-  EXPECT_EQ(defaults.defaults(3).edition(), EDITION_99997_TEST_ONLY);
-  EXPECT_EQ(defaults.defaults(4).edition(), EDITION_99998_TEST_ONLY);
-  EXPECT_EQ(
-      defaults.defaults(0).features().GetExtension(pb::test).file_feature(),
-      pb::EnumFeature::VALUE1);
-  EXPECT_EQ(
-      defaults.defaults(1).features().GetExtension(pb::test).file_feature(),
-      pb::EnumFeature::VALUE2);
-  EXPECT_EQ(
-      defaults.defaults(2).features().GetExtension(pb::test).file_feature(),
-      pb::EnumFeature::VALUE3);
-  EXPECT_EQ(
-      defaults.defaults(3).features().GetExtension(pb::test).file_feature(),
-      pb::EnumFeature::VALUE4);
-  EXPECT_EQ(
-      defaults.defaults(4).features().GetExtension(pb::test).file_feature(),
-      pb::EnumFeature::VALUE5);
+  EXPECT_EQ(defaults.defaults(3).edition(), EDITION_2024);
+  EXPECT_EQ(defaults.defaults(4).edition(), EDITION_99997_TEST_ONLY);
+  EXPECT_EQ(defaults.defaults(5).edition(), EDITION_99998_TEST_ONLY);
+  EXPECT_EQ(defaults.defaults(0)
+                .fixed_features()
+                .GetExtension(pb::test)
+                .file_feature(),
+            pb::EnumFeature::VALUE1);
+  EXPECT_EQ(defaults.defaults(2)
+                .overridable_features()
+                .GetExtension(pb::test)
+                .file_feature(),
+            pb::EnumFeature::VALUE3);
+  EXPECT_EQ(defaults.defaults(3)
+                .overridable_features()
+                .GetExtension(pb::test)
+                .file_feature(),
+            pb::EnumFeature::VALUE3);
+  EXPECT_EQ(defaults.defaults(4)
+                .overridable_features()
+                .GetExtension(pb::test)
+                .file_feature(),
+            pb::EnumFeature::VALUE4);
+  EXPECT_EQ(defaults.defaults(5)
+                .overridable_features()
+                .GetExtension(pb::test)
+                .file_feature(),
+            pb::EnumFeature::VALUE5);
 }
 
 #ifndef _WIN32

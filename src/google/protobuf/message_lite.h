@@ -16,13 +16,13 @@
 #ifndef GOOGLE_PROTOBUF_MESSAGE_LITE_H__
 #define GOOGLE_PROTOBUF_MESSAGE_LITE_H__
 
-#include <atomic>
 #include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 
-#include "google/protobuf/stubs/common.h"
-#include "absl/base/call_once.h"
+#include "absl/base/attributes.h"
 #include "absl/log/absl_check.h"
 #include "absl/strings/cord.h"
 #include "absl/strings/string_view.h"
@@ -208,7 +208,7 @@ PROTOBUF_EXPORT size_t StringSpaceUsedExcludingSelfLong(const std::string& str);
 // the internal library are allowed to create subclasses.
 class PROTOBUF_EXPORT MessageLite {
  public:
-  constexpr MessageLite() {}
+  constexpr MessageLite() = default;
   MessageLite(const MessageLite&) = delete;
   MessageLite& operator=(const MessageLite&) = delete;
   virtual ~MessageLite() = default;
@@ -240,7 +240,7 @@ class PROTOBUF_EXPORT MessageLite {
   virtual void Clear() = 0;
 
   // Quickly check if all required fields have values set.
-  virtual bool IsInitialized() const = 0;
+  bool IsInitialized() const;
 
   // This is not implemented for Lite messages -- it just returns "(cannot
   // determine missing fields for lite message)".  However, it is implemented
@@ -537,6 +537,7 @@ class PROTOBUF_EXPORT MessageLite {
     std::string (*get_type_name)(const MessageLite&);
     std::string (*initialization_error_string)(const MessageLite&);
     const internal::TcParseTableBase* (*get_tc_table)(const MessageLite&);
+    size_t (*space_used_long)(const MessageLite&);
   };
   struct ClassDataFull;
   // Note: The order of arguments in the functions is chosen so that it has
@@ -550,6 +551,7 @@ class PROTOBUF_EXPORT MessageLite {
   struct ClassData {
     const internal::TcParseTableBase* tc_table;
     void (*on_demand_register_arena_dtor)(MessageLite& msg, Arena& arena);
+    bool (*is_initialized)(const MessageLite&);
 
     // Offset of the CachedSize member.
     uint32_t cached_size_offset;
@@ -557,22 +559,25 @@ class PROTOBUF_EXPORT MessageLite {
     // char[] just beyond the ClassData.
     bool is_lite;
 
-    // Temporary constructor while we migrate existing classes to populate the
-    // `tc_table` field.
-    constexpr ClassData(void (*on_demand_register_arena_dtor)(MessageLite&,
-                                                              Arena&),
-                        uint32_t cached_size_offset, bool is_lite)
-        : tc_table(),
-          on_demand_register_arena_dtor(on_demand_register_arena_dtor),
-          cached_size_offset(cached_size_offset),
-          is_lite(is_lite) {}
-
+    // XXX REMOVE XXX
     constexpr ClassData(const internal::TcParseTableBase* tc_table,
                         void (*on_demand_register_arena_dtor)(MessageLite&,
                                                               Arena&),
                         uint32_t cached_size_offset, bool is_lite)
         : tc_table(tc_table),
           on_demand_register_arena_dtor(on_demand_register_arena_dtor),
+          is_initialized(nullptr),
+          cached_size_offset(cached_size_offset),
+          is_lite(is_lite) {}
+
+    constexpr ClassData(const internal::TcParseTableBase* tc_table,
+                        void (*on_demand_register_arena_dtor)(MessageLite&,
+                                                              Arena&),
+                        bool (*is_initialized)(const MessageLite&),
+                        uint32_t cached_size_offset, bool is_lite)
+        : tc_table(tc_table),
+          on_demand_register_arena_dtor(on_demand_register_arena_dtor),
+          is_initialized(is_initialized),
           cached_size_offset(cached_size_offset),
           is_lite(is_lite) {}
 

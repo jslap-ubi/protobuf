@@ -272,7 +272,8 @@ TEST_F(CodeGeneratorTest, BuildFeatureSetDefaults) {
               IsOkAndHolds(EqualsProto(R"pb(
                 defaults {
                   edition: EDITION_PROTO2
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: EXPLICIT
                     enum_type: CLOSED
                     repeated_field_encoding: EXPANDED
@@ -283,7 +284,8 @@ TEST_F(CodeGeneratorTest, BuildFeatureSetDefaults) {
                 }
                 defaults {
                   edition: EDITION_PROTO3
-                  features {
+                  overridable_features {}
+                  fixed_features {
                     field_presence: IMPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -294,7 +296,7 @@ TEST_F(CodeGeneratorTest, BuildFeatureSetDefaults) {
                 }
                 defaults {
                   edition: EDITION_2023
-                  features {
+                  overridable_features {
                     field_presence: EXPLICIT
                     enum_type: OPEN
                     repeated_field_encoding: PACKED
@@ -302,6 +304,7 @@ TEST_F(CodeGeneratorTest, BuildFeatureSetDefaults) {
                     message_encoding: LENGTH_PREFIXED
                     json_format: ALLOW
                   }
+                  fixed_features {}
                 }
                 minimum_edition: EDITION_99997_TEST_ONLY
                 maximum_edition: EDITION_99999_TEST_ONLY

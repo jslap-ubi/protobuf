@@ -10,14 +10,17 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/container/fixed_array.h"
 #include "absl/log/absl_check.h"
 #include "absl/numeric/bits.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 #include "absl/types/span.h"
 #include "google/protobuf/descriptor.h"
@@ -44,31 +47,71 @@ bool TreatEnumAsInt(const FieldDescriptor* field) {
           field->containing_type()->map_value() == field);
 }
 
-bool GetEnumValidationRange(const EnumDescriptor* enum_type, int16_t& start,
+bool SetEnumValidationRange(int start_value, int64_t size_value, int16_t& start,
                             uint16_t& size) {
-  ABSL_CHECK_GT(enum_type->value_count(), 0) << enum_type->DebugString();
-
-  // Check if the enum values are a single, contiguous range.
-  std::vector<int> enum_values;
-  for (int i = 0, N = static_cast<int>(enum_type->value_count()); i < N; ++i) {
-    enum_values.push_back(enum_type->value(i)->number());
-  }
-  auto values_begin = enum_values.begin();
-  auto values_end = enum_values.end();
-  std::sort(values_begin, values_end);
-  enum_values.erase(std::unique(values_begin, values_end), values_end);
-
-  if (std::numeric_limits<int16_t>::min() <= enum_values[0] &&
-      enum_values[0] <= std::numeric_limits<int16_t>::max() &&
-      enum_values.size() <= std::numeric_limits<uint16_t>::max() &&
-      static_cast<int>(enum_values[0] + enum_values.size() - 1) ==
-          enum_values.back()) {
-    start = static_cast<int16_t>(enum_values[0]);
-    size = static_cast<uint16_t>(enum_values.size());
-    return true;
-  } else {
+  if (static_cast<int16_t>(start_value) != start_value) {
     return false;
   }
+
+  if (static_cast<uint16_t>(size_value) != size_value) {
+    return false;
+  }
+
+  start = start_value;
+  size = size_value;
+  return true;
+}
+
+bool GetEnumValidationRangeSlow(const EnumDescriptor* enum_type, int16_t& start,
+                                uint16_t& size) {
+  const auto val = [&](int index) { return enum_type->value(index)->number(); };
+  int min = val(0);
+  int max = min;
+
+  for (int i = 1, N = static_cast<int>(enum_type->value_count()); i < N; ++i) {
+    min = std::min(min, val(i));
+    max = std::max(max, val(i));
+  }
+
+  // int64 because max-min can overflow int.
+  int64_t range = static_cast<int64_t>(max) - static_cast<int64_t>(min) + 1;
+
+  if (enum_type->value_count() < range) {
+    // There are not enough values to fill the range. Exit early.
+    return false;
+  }
+
+  if (!SetEnumValidationRange(min, range, start, size)) {
+    // Don't even bother on checking for a dense range if we can't represent the
+    // min/max in the output.
+    return false;
+  }
+
+  absl::FixedArray<uint64_t> array((range + 63) / 64);
+  array.fill(0);
+
+  int unique_count = 0;
+  for (int i = 0, N = static_cast<int>(enum_type->value_count()); i < N; ++i) {
+    size_t index = val(i) - min;
+    uint64_t& v = array[index / 64];
+    size_t bit_pos = index % 64;
+    unique_count += (v & (uint64_t{1} << bit_pos)) == 0;
+    v |= uint64_t{1} << bit_pos;
+  }
+
+  return unique_count == range;
+}
+
+bool GetEnumValidationRange(const EnumDescriptor* enum_type, int16_t& start,
+                            uint16_t& size) {
+  if (!IsEnumFullySequential(enum_type)) {
+    // Maybe the labels are not sequential in declaration order, but the values
+    // could still be a dense range. Try the slower approach.
+    return GetEnumValidationRangeSlow(enum_type, start, size);
+  }
+
+  return SetEnumValidationRange(enum_type->value(0)->number(),
+                                enum_type->value_count(), start, size);
 }
 
 enum class EnumRangeInfo {
@@ -194,14 +237,14 @@ TailCallTableInfo::FastFieldInfo::Field MakeFastFieldEntry(
       picked = PROTOBUF_PICK_STRING_FUNCTION(kFastB);
       break;
     case FieldDescriptor::TYPE_STRING:
-      switch (internal::cpp::GetUtf8CheckMode(field, message_options.is_lite)) {
-        case internal::cpp::Utf8CheckMode::kStrict:
+      switch (entry.utf8_check_mode) {
+        case cpp::Utf8CheckMode::kStrict:
           picked = PROTOBUF_PICK_STRING_FUNCTION(kFastU);
           break;
-        case internal::cpp::Utf8CheckMode::kVerify:
+        case cpp::Utf8CheckMode::kVerify:
           picked = PROTOBUF_PICK_STRING_FUNCTION(kFastS);
           break;
-        case internal::cpp::Utf8CheckMode::kNone:
+        case cpp::Utf8CheckMode::kNone:
           picked = PROTOBUF_PICK_STRING_FUNCTION(kFastB);
           break;
       }
@@ -422,69 +465,81 @@ void PopulateFastFields(
   }
 }
 
-// We only need field names for reporting UTF-8 parsing errors, so we only
-// emit them for string fields with Utf8 transform specified.
-bool NeedsFieldNameForTable(const FieldDescriptor* field, bool is_lite) {
-  return cpp::GetUtf8CheckMode(field, is_lite) != cpp::Utf8CheckMode::kNone;
-}
-
-absl::string_view FieldNameForTable(
-    const TailCallTableInfo::FieldEntryInfo& entry,
-    const TailCallTableInfo::MessageOptions& message_options) {
-  if (NeedsFieldNameForTable(entry.field, message_options.is_lite)) {
-    return entry.field->name();
-  }
-  return "";
-}
-
 std::vector<uint8_t> GenerateFieldNames(
     const Descriptor* descriptor,
-    const std::vector<TailCallTableInfo::FieldEntryInfo>& entries,
+    const absl::Span<const TailCallTableInfo::FieldEntryInfo> entries,
     const TailCallTableInfo::MessageOptions& message_options,
     absl::Span<const TailCallTableInfo::FieldOptions> fields) {
-  static constexpr int kMaxNameLength = 255;
-  std::vector<uint8_t> out;
+  static constexpr size_t kMaxNameLength = 255;
 
-  std::vector<absl::string_view> names;
-  bool found_needed_name = false;
-  for (const auto& entry : entries) {
-    names.push_back(FieldNameForTable(entry, message_options));
-    if (!names.back().empty()) found_needed_name = true;
-  }
+  size_t field_name_total_size = 0;
+  const auto for_each_field_name = [&](auto with_name, auto no_name) {
+    for (const auto& entry : entries) {
+      // We only need field names for reporting UTF-8 parsing errors, so we only
+      // emit them for string fields with Utf8 transform specified.
+      if (entry.utf8_check_mode != cpp::Utf8CheckMode::kNone) {
+        with_name(absl::string_view(entry.field->name()));
+      } else {
+        no_name();
+      }
+    }
+  };
+
+  for_each_field_name([&](auto name) { field_name_total_size += name.size(); },
+                      [] {});
 
   // No names needed. Omit the whole table.
-  if (!found_needed_name) {
-    return out;
+  if (field_name_total_size == 0) {
+    return {};
   }
+
+  const absl::string_view message_name = descriptor->full_name();
+  uint8_t message_name_size =
+      static_cast<uint8_t>(std::min(message_name.size(), kMaxNameLength));
+  size_t total_byte_size =
+      ((/* message */ 1 + /* fields */ entries.size() + /* round up */ 7) &
+       ~7) +
+      message_name_size + field_name_total_size;
+
+  std::vector<uint8_t> out_vec(total_byte_size, uint8_t{0});
+  uint8_t* out_it = out_vec.data();
 
   // First, we output the size of each string, as an unsigned byte. The first
   // string is the message name.
   int count = 1;
-  out.push_back(std::min(static_cast<int>(descriptor->full_name().size()),
-                         kMaxNameLength));
-  for (auto field_name : names) {
-    out.push_back(field_name.size());
-    ++count;
-  }
-  while (count & 7) {  // align to an 8-byte boundary
-    out.push_back(0);
-    ++count;
-  }
+  *out_it++ = message_name_size;
+  for_each_field_name(
+      [&](auto name) {
+        *out_it++ = static_cast<uint8_t>(name.size());
+        ++count;
+      },
+      [&] {
+        ++out_it;
+        ++count;
+      });
+  // align to an 8-byte boundary
+  out_it += -count & 7;
+
+  const auto append = [&](absl::string_view str) {
+    if (!str.empty()) {
+      memcpy(out_it, str.data(), str.size());
+      out_it += str.size();
+    }
+  };
+
   // The message name is stored at the beginning of the string
-  std::string message_name = descriptor->full_name();
   if (message_name.size() > kMaxNameLength) {
     static constexpr int kNameHalfLength = (kMaxNameLength - 3) / 2;
-    message_name = absl::StrCat(
-        message_name.substr(0, kNameHalfLength), "...",
-        message_name.substr(message_name.size() - kNameHalfLength));
+    append(message_name.substr(0, kNameHalfLength));
+    append("...");
+    append(message_name.substr(message_name.size() - kNameHalfLength));
+  } else {
+    append(message_name);
   }
-  out.insert(out.end(), message_name.begin(), message_name.end());
   // Then we output the actual field names
-  for (auto field_name : names) {
-    out.insert(out.end(), field_name.begin(), field_name.end());
-  }
+  for_each_field_name([&](auto name) { append(name); }, [] {});
 
-  return out;
+  return out_vec;
 }
 
 TailCallTableInfo::NumToEntryTable MakeNumToEntryTable(
@@ -552,7 +607,8 @@ TailCallTableInfo::NumToEntryTable MakeNumToEntryTable(
 uint16_t MakeTypeCardForField(
     const FieldDescriptor* field, bool has_hasbit,
     const TailCallTableInfo::MessageOptions& message_options,
-    const TailCallTableInfo::FieldOptions& options) {
+    const TailCallTableInfo::FieldOptions& options,
+    cpp::Utf8CheckMode utf8_check_mode) {
   uint16_t type_card;
   namespace fl = internal::field_layout;
   if (has_hasbit) {
@@ -655,14 +711,14 @@ uint16_t MakeTypeCardForField(
       type_card |= fl::kBytes;
       break;
     case FieldDescriptor::TYPE_STRING: {
-      switch (internal::cpp::GetUtf8CheckMode(field, message_options.is_lite)) {
-        case internal::cpp::Utf8CheckMode::kStrict:
+      switch (utf8_check_mode) {
+        case cpp::Utf8CheckMode::kStrict:
           type_card |= fl::kUtf8String;
           break;
-        case internal::cpp::Utf8CheckMode::kVerify:
+        case cpp::Utf8CheckMode::kVerify:
           type_card |= fl::kRawString;
           break;
-        case internal::cpp::Utf8CheckMode::kNone:
+        case cpp::Utf8CheckMode::kNone:
           type_card |= fl::kBytes;
           break;
       }
@@ -840,8 +896,11 @@ TailCallTableInfo::TailCallTableInfo(
     auto* field = options.field;
     field_entries.push_back({field, options.has_bit_index});
     auto& entry = field_entries.back();
-    entry.type_card = MakeTypeCardForField(field, entry.hasbit_idx >= 0,
-                                           message_options, options);
+    entry.utf8_check_mode =
+        cpp::GetUtf8CheckMode(field, message_options.is_lite);
+    entry.type_card =
+        MakeTypeCardForField(field, entry.hasbit_idx >= 0, message_options,
+                             options, entry.utf8_check_mode);
 
     if (field->type() == FieldDescriptor::TYPE_MESSAGE ||
         field->type() == FieldDescriptor::TYPE_GROUP) {
